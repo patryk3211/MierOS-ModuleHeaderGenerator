@@ -49,7 +49,7 @@ Elf64_Addr add_string(const std::string& value) {
     return offset;
 }
 
-void add_array_entry(Elf64_Addr value) {
+void add_relocatable_entry(Elf64_Addr value) {
     Elf64_Addr offset = add_value(value);
     s_relocations->add_entry(offset, MODHDR_SYMBOL_IDX, R_X86_64_64, value);
 }
@@ -64,10 +64,17 @@ Elf64_Addr add_string_array(const std::list<std::string>& values) {
         s_data.resize((s_data.size() | 0xF) + 1);
     
     Elf64_Addr offset = s_data.size();
-    std::for_each(addresses.begin(), addresses.end(), add_array_entry);
+    std::for_each(addresses.begin(), addresses.end(), add_relocatable_entry);
     add_value<Elf64_Addr>(0); // Terminate the array
     return offset;
 }
+
+struct ModuleHeader {
+    uint64_t magic;
+    char name[128];
+    Elf64_Addr dependencies;
+    Elf64_Addr aliases;
+};
 
 int main(int argc, char* argv[]) {
     if(argc != 3) {
@@ -85,7 +92,7 @@ int main(int argc, char* argv[]) {
     // Create sections
     section* modHdr = writer.sections.add(".modulehdr");
     modHdr->set_type(SHT_PROGBITS);
-    modHdr->set_flags(SHF_ALLOC);
+    modHdr->set_flags(SHF_ALLOC | SHF_WRITE);
     modHdr->set_addr_align(0x10);
 
     section* modHdrRela = writer.sections.add(".rela.modulehdr");
@@ -118,8 +125,8 @@ int main(int argc, char* argv[]) {
     s_relocations = &accessor;
 
     // Build the module header
-    std::vector<uint8_t> headerStorage;
-    add_value(MODULE_MAGIC, headerStorage);
+    add_value(MODULE_MAGIC);
+    size_t headerSize = 0;
 
     try {
         std::ifstream manifestStream(argv[1]);
@@ -130,35 +137,46 @@ int main(int argc, char* argv[]) {
             if(moduleName.length() > 127)
                 throw std::length_error("Module name exceeds 127 character limit");
 
-            size_t offset = headerStorage.size();
-            headerStorage.resize(headerStorage.size() + 128, 0);
-            memcpy(headerStorage.data() + offset, moduleName.c_str(), moduleName.length());
+            size_t offset = s_data.size();
+            s_data.resize(s_data.size() + 128, 0);
+            memcpy(s_data.data() + offset, moduleName.c_str(), moduleName.length());
         }
 
+        // Allocate space for 2 addresses
+        Elf64_Addr depAddr = s_data.size();
+        Elf64_Addr aliasAddr = s_data.size() + sizeof(Elf64_Addr);
+        s_data.resize(s_data.size() + sizeof(Elf64_Addr) * 2, 0);
+
+        headerSize = s_data.size();
+
         { // Handle dependencies
-            std::list<std::string> depList;
+            auto deps = manifestJson.find("dependencies");
+            if(deps != manifestJson.end()) {
+                std::list<std::string> depList;
 
-            auto deps = manifestJson.at("dependencies");
-            for(auto& dependency : deps) {
-                auto depName = dependency.get<std::string>();
-                depList.push_back(depName);
+                for(auto& dependency : *deps) {
+                    auto depName = dependency.get<std::string>();
+                    depList.push_back(depName);
+                }
+
+                Elf64_Addr addr = add_string_array(depList);
+                s_relocations->add_entry(depAddr, MODHDR_SYMBOL_IDX, R_X86_64_64, addr);
             }
-
-            Elf64_Addr addr = add_string_array(depList);
-            add_value(addr, headerStorage);
         }
 
         { // Handle aliases
-            std::list<std::string> aliasList;
+            auto aliases = manifestJson.find("aliases");
+            if(aliases != manifestJson.end()) {
+                std::list<std::string> aliasList;
 
-            auto aliases = manifestJson.at("aliases");
-            for(auto& alias : aliases) {
-                auto aliasStr = alias.get<std::string>();
-                aliasList.push_back(aliasStr);
+                for(auto& alias : *aliases) {
+                    auto aliasStr = alias.get<std::string>();
+                    aliasList.push_back(aliasStr);
+                }
+
+                Elf64_Addr addr = add_string_array(aliasList);
+                s_relocations->add_entry(aliasAddr, MODHDR_SYMBOL_IDX, R_X86_64_64, addr);
             }
-
-            Elf64_Addr addr = add_string_array(aliasList);
-            add_value(addr, headerStorage);
         }
     } catch(const std::exception& e) {
         std::cerr << "Module manifest parsing failed, what(): " << e.what();
@@ -166,9 +184,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Add header symbol
-    Elf64_Addr headerStart = s_data.size();
-    s_data.insert(s_data.end(), headerStorage.begin(), headerStorage.end());
-    symbolAccessor.add_symbol(stringAccessor, "__module_header", headerStart, headerStorage.size(),
+    symbolAccessor.add_symbol(stringAccessor, "__module_header", 0, headerSize,
                               STB_GLOBAL, STT_OBJECT, STV_DEFAULT, MODHDR_SECTION_IDX);
 
     modHdr->set_data((char*)s_data.data(), s_data.size());
