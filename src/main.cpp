@@ -35,9 +35,9 @@ static relocation_section_accessor* s_relocations;
     (uint64_t) '1'  << 56
 
 template<typename T> Elf64_Addr add_value(const T& value, std::vector<uint8_t>& storage = s_data) {
-    Elf64_Addr offset = s_data.size();
-    s_data.resize(offset + sizeof(T));
-    memcpy(s_data.data() + offset, &value, sizeof(T));
+    Elf64_Addr offset = storage.size();
+    storage.resize(offset + sizeof(T));
+    memcpy(storage.data() + offset, &value, sizeof(T));
     return offset;
 }
 
@@ -129,13 +129,10 @@ int main(int argc, char* argv[]) {
             std::string moduleName = manifestJson.at("name");
             if(moduleName.length() > 127)
                 throw std::length_error("Module name exceeds 127 character limit");
-            
-            char tempStorage[128];
-            memset(tempStorage, 0, sizeof(tempStorage));
-            memcpy(tempStorage, moduleName.c_str(), moduleName.length());
 
-            // Insert module name
-            headerStorage.insert(headerStorage.end(), tempStorage, tempStorage + 128);
+            size_t offset = headerStorage.size();
+            headerStorage.resize(headerStorage.size() + 128, 0);
+            memcpy(headerStorage.data() + offset, moduleName.c_str(), moduleName.length());
         }
 
         { // Handle dependencies
