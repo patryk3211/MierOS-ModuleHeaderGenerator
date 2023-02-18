@@ -1,0 +1,8 @@
+[submodule "libs/elfio"]
+	path = libs/elfio
+    url = git@github.com:serge1/ELFIO.git
+    shallow = true
+[submodule "libs/json"]
+	path = libs/json
+    url = git@github.com:nlohmann/json.git
+    shallow = true
